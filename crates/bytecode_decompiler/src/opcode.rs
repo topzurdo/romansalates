@@ -1,3 +1,27 @@
+use crate::opcode_table::{meta_for_index, OP_META};
+
+/// How the low byte of each instruction word maps to a logical Luau opcode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WireFormat {
+    /// Pick Roblox×227 vs plain by scoring parse quality on the blob.
+    #[default]
+    Auto,
+    /// Roblox: `logical = (wire * 203) & 0xFF` (inverse of ×227).
+    Roblox227,
+    /// Upstream Luau / Fiu: low byte is the opcode index directly.
+    Plain,
+}
+
+impl WireFormat {
+    pub fn decode_wire_byte(self, wire: u8) -> u8 {
+        match self {
+            WireFormat::Roblox227 => ((wire as u16).wrapping_mul(203) & 0xff) as u8,
+            WireFormat::Plain => wire,
+            WireFormat::Auto => wire,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum Opcode {
@@ -84,11 +108,132 @@ pub enum Opcode {
     JumpXEqKs,
     Idiv,
     IdivK,
+    GetUdataKs,
+    SetUdataKs,
+    NameCallUdata,
+    NewClassMember,
+    CallFb,
     Unknown(u8),
 }
 
 impl Opcode {
+    pub const COUNT: u8 = 88;
+
+    /// Encode a logical opcode for the low byte of an instruction word (Roblox Luau).
+    pub fn encode_u8(op: u8) -> u8 {
+        ((op as u16).wrapping_mul(227) & 0xff) as u8
+    }
+
+    pub fn from_wire_byte(wire: u8, format: WireFormat) -> Self {
+        Self::from_u8_raw(format.decode_wire_byte(wire))
+    }
+
+    /// Roblox-scrambled wire byte → logical opcode (default for legacy call sites).
     pub fn from_u8(v: u8) -> Self {
+        Self::from_wire_byte(v, WireFormat::Roblox227)
+    }
+
+    pub fn index(self) -> u8 {
+        match self {
+            Self::Nop => 0,
+            Self::Break => 1,
+            Self::LoadNil => 2,
+            Self::LoadB => 3,
+            Self::LoadN => 4,
+            Self::LoadK => 5,
+            Self::Move => 6,
+            Self::GetGlobal => 7,
+            Self::SetGlobal => 8,
+            Self::GetUpval => 9,
+            Self::Setupval => 10,
+            Self::CloseUpvals => 11,
+            Self::GetImport => 12,
+            Self::GetTable => 13,
+            Self::SetTable => 14,
+            Self::GetTableKs => 15,
+            Self::SetTableKs => 16,
+            Self::GetTableN => 17,
+            Self::SetTableN => 18,
+            Self::NewClosure => 19,
+            Self::NameCall => 20,
+            Self::Call => 21,
+            Self::Return => 22,
+            Self::Jump => 23,
+            Self::JumpBack => 24,
+            Self::JumpIf => 25,
+            Self::JumpIfNot => 26,
+            Self::JumpIfEq => 27,
+            Self::JumpIfLe => 28,
+            Self::JumpIfLt => 29,
+            Self::JumpIfNeq => 30,
+            Self::JumpIfNotLe => 31,
+            Self::JumpIfNotLt => 32,
+            Self::Add => 33,
+            Self::Sub => 34,
+            Self::Mul => 35,
+            Self::Div => 36,
+            Self::Mod => 37,
+            Self::Pow => 38,
+            Self::AddK => 39,
+            Self::SubK => 40,
+            Self::MulK => 41,
+            Self::DivK => 42,
+            Self::ModK => 43,
+            Self::PowK => 44,
+            Self::And => 45,
+            Self::Or => 46,
+            Self::AndK => 47,
+            Self::OrK => 48,
+            Self::Concat => 49,
+            Self::Not => 50,
+            Self::Minus => 51,
+            Self::Length => 52,
+            Self::NewTable => 53,
+            Self::DupTable => 54,
+            Self::SetList => 55,
+            Self::ForNPrep => 56,
+            Self::ForNLoop => 57,
+            Self::ForGLoop => 58,
+            Self::ForGPrepInext => 59,
+            Self::FastCall3 => 60,
+            Self::ForGPrepNext => 61,
+            Self::NativeCall => 62,
+            Self::GetVarargs => 63,
+            Self::DupClosure => 64,
+            Self::PrepVarargs => 65,
+            Self::LoadKx => 66,
+            Self::JumpX => 67,
+            Self::FastCall => 68,
+            Self::Coverage => 69,
+            Self::Capture => 70,
+            Self::SubRk => 71,
+            Self::DivRk => 72,
+            Self::FastCall1 => 73,
+            Self::FastCall2 => 74,
+            Self::FastCall2K => 75,
+            Self::ForGPrep => 76,
+            Self::JumpXEqNil => 77,
+            Self::JumpXEqKb => 78,
+            Self::JumpXEqKn => 79,
+            Self::JumpXEqKs => 80,
+            Self::Idiv => 81,
+            Self::IdivK => 82,
+            Self::GetUdataKs => 83,
+            Self::SetUdataKs => 84,
+            Self::NameCallUdata => 85,
+            Self::NewClassMember => 86,
+            Self::CallFb => 87,
+            Self::Unknown(v) => v,
+        }
+    }
+
+    pub fn min_bytecode_version(self) -> u8 {
+        meta_for_index(self.index())
+            .map(|m| m.min_version)
+            .unwrap_or(255)
+    }
+
+    pub fn from_u8_raw(v: u8) -> Self {
         match v {
             0 => Self::Nop,
             1 => Self::Break,
@@ -173,97 +318,19 @@ impl Opcode {
             80 => Self::JumpXEqKs,
             81 => Self::Idiv,
             82 => Self::IdivK,
+            83 => Self::GetUdataKs,
+            84 => Self::SetUdataKs,
+            85 => Self::NameCallUdata,
+            86 => Self::NewClassMember,
+            87 => Self::CallFb,
             other => Self::Unknown(other),
         }
     }
 
     pub fn name(self) -> &'static str {
-        match self {
-            Self::Nop => "NOP",
-            Self::Break => "BREAK",
-            Self::LoadNil => "LOADNIL",
-            Self::LoadB => "LOADB",
-            Self::LoadN => "LOADN",
-            Self::LoadK => "LOADK",
-            Self::Move => "MOVE",
-            Self::GetGlobal => "GETGLOBAL",
-            Self::SetGlobal => "SETGLOBAL",
-            Self::GetUpval => "GETUPVAL",
-            Self::Setupval => "SETUPVAL",
-            Self::CloseUpvals => "CLOSEUPVALS",
-            Self::GetImport => "GETIMPORT",
-            Self::GetTable => "GETTABLE",
-            Self::SetTable => "SETTABLE",
-            Self::GetTableKs => "GETTABLEKS",
-            Self::SetTableKs => "SETTABLEKS",
-            Self::GetTableN => "GETTABLEN",
-            Self::SetTableN => "SETTABLEN",
-            Self::NewClosure => "NEWCLOSURE",
-            Self::NameCall => "NAMECALL",
-            Self::Call => "CALL",
-            Self::Return => "RETURN",
-            Self::Jump => "JUMP",
-            Self::JumpBack => "JUMPBACK",
-            Self::JumpIf => "JUMPIF",
-            Self::JumpIfNot => "JUMPIFNOT",
-            Self::JumpIfEq => "JUMPIFEQ",
-            Self::JumpIfLe => "JUMPIFLE",
-            Self::JumpIfLt => "JUMPIFLT",
-            Self::JumpIfNeq => "JUMPIFNOTEQ",
-            Self::JumpIfNotLe => "JUMPIFNOTLE",
-            Self::JumpIfNotLt => "JUMPIFNOTLT",
-            Self::Add => "ADD",
-            Self::Sub => "SUB",
-            Self::Mul => "MUL",
-            Self::Div => "DIV",
-            Self::Mod => "MOD",
-            Self::Pow => "POW",
-            Self::AddK => "ADDK",
-            Self::SubK => "SUBK",
-            Self::MulK => "MULK",
-            Self::DivK => "DIVK",
-            Self::ModK => "MODK",
-            Self::PowK => "POWK",
-            Self::And => "AND",
-            Self::Or => "OR",
-            Self::AndK => "ANDK",
-            Self::OrK => "ORK",
-            Self::Concat => "CONCAT",
-            Self::Not => "NOT",
-            Self::Minus => "MINUS",
-            Self::Length => "LENGTH",
-            Self::NewTable => "NEWTABLE",
-            Self::DupTable => "DUPTABLE",
-            Self::SetList => "SETLIST",
-            Self::ForNPrep => "FORNPREP",
-            Self::ForNLoop => "FORNLOOP",
-            Self::ForGLoop => "FORGLOOP",
-            Self::ForGPrepInext => "FORGPREP_INEXT",
-            Self::FastCall3 => "FASTCALL3",
-            Self::ForGPrepNext => "FORGPREP_NEXT",
-            Self::NativeCall => "NATIVECALL",
-            Self::GetVarargs => "GETVARARGS",
-            Self::DupClosure => "DUPCLOSURE",
-            Self::PrepVarargs => "PREPVARARGS",
-            Self::LoadKx => "LOADKX",
-            Self::JumpX => "JUMPX",
-            Self::FastCall => "FASTCALL",
-            Self::Coverage => "COVERAGE",
-            Self::Capture => "CAPTURE",
-            Self::SubRk => "SUBRK",
-            Self::DivRk => "DIVRK",
-            Self::FastCall1 => "FASTCALL1",
-            Self::FastCall2 => "FASTCALL2",
-            Self::FastCall2K => "FASTCALL2K",
-            Self::ForGPrep => "FORGPREP",
-            Self::JumpXEqNil => "JUMPXEQKNIL",
-            Self::JumpXEqKb => "JUMPXEQKB",
-            Self::JumpXEqKn => "JUMPXEQKN",
-            Self::JumpXEqKs => "JUMPXEQKS",
-            Self::Idiv => "IDIV",
-            Self::IdivK => "IDIVK",
-            Self::Unknown(_) => "UNKNOWN",
-        }
+        meta_for_index(self.index())
+            .map(|m| m.name)
+            .unwrap_or("UNKNOWN")
     }
 
     pub fn word_len(self) -> usize {
@@ -271,59 +338,22 @@ impl Opcode {
     }
 
     pub fn has_aux(self) -> bool {
-        matches!(
-            self,
-            Self::GetGlobal
-                | Self::SetGlobal
-                | Self::GetImport
-                | Self::GetTableKs
-                | Self::SetTableKs
-                | Self::NameCall
-                | Self::JumpIfEq
-                | Self::JumpIfLe
-                | Self::JumpIfLt
-                | Self::JumpIfNeq
-                | Self::JumpIfNotLe
-                | Self::JumpIfNotLt
-                | Self::NewTable
-                | Self::SetList
-                | Self::ForGLoop
-                | Self::LoadKx
-                | Self::FastCall2
-                | Self::FastCall2K
-                | Self::FastCall3
-                | Self::JumpXEqNil
-                | Self::JumpXEqKb
-                | Self::JumpXEqKn
-                | Self::JumpXEqKs
-        )
+        meta_for_index(self.index())
+            .map(|m| m.has_aux)
+            .unwrap_or(false)
     }
 
     pub fn is_branch(self) -> bool {
+        if meta_for_index(self.index()).is_some_and(|m| m.is_branch) {
+            return true;
+        }
+        matches!(self, Self::LoadB)
+    }
+
+    pub fn is_jump_x_eq(self) -> bool {
         matches!(
             self,
-            Self::Jump
-                | Self::JumpBack
-                | Self::JumpIf
-                | Self::JumpIfNot
-                | Self::JumpIfEq
-                | Self::JumpIfLe
-                | Self::JumpIfLt
-                | Self::JumpIfNeq
-                | Self::JumpIfNotLe
-                | Self::JumpIfNotLt
-                | Self::ForNPrep
-                | Self::ForNLoop
-                | Self::ForGLoop
-                | Self::ForGPrep
-                | Self::ForGPrepInext
-                | Self::ForGPrepNext
-                | Self::JumpX
-                | Self::JumpXEqNil
-                | Self::JumpXEqKb
-                | Self::JumpXEqKn
-                | Self::JumpXEqKs
-                | Self::LoadB
+            Self::JumpXEqNil | Self::JumpXEqKb | Self::JumpXEqKn | Self::JumpXEqKs
         )
     }
 
@@ -354,8 +384,64 @@ impl Opcode {
     }
 
     pub fn terminates_block(self) -> bool {
-        matches!(self, Self::Return | Self::Jump | Self::JumpBack | Self::JumpX)
+        meta_for_index(self.index())
+            .is_some_and(|m| m.terminates)
     }
+}
+
+/// Score how well `format` decodes a raw instruction word stream (higher = better).
+pub fn score_instruction_words(raw_words: &[u32], format: WireFormat) -> i32 {
+    if format == WireFormat::Auto {
+        return i32::MIN;
+    }
+    let mut idx = 0usize;
+    let mut score = 0i32;
+    while idx < raw_words.len() {
+        let raw = raw_words[idx];
+        let op = Opcode::from_wire_byte((raw & 0xff) as u8, format);
+        score += match op {
+            Opcode::Unknown(_) => -12,
+            _ if (op.index() as usize) < OP_META.len() => 3,
+            _ => -4,
+        };
+        if op.has_aux() {
+            idx += 1;
+            if idx >= raw_words.len() {
+                return i32::MIN / 4;
+            }
+        }
+        idx += 1;
+    }
+    let consumed: usize = {
+        let mut i = 0usize;
+        let mut words = 0usize;
+        while i < raw_words.len() {
+            let op = Opcode::from_wire_byte((raw_words[i] & 0xff) as u8, format);
+            words += op.word_len();
+            i += op.word_len();
+        }
+        words
+    };
+    if consumed != raw_words.len() {
+        score -= 500;
+    }
+    score
+}
+
+pub fn detect_wire_format(all_proto_words: &[&[u32]]) -> WireFormat {
+    let mut best = WireFormat::Roblox227;
+    let mut best_score = i32::MIN;
+    for format in [WireFormat::Roblox227, WireFormat::Plain] {
+        let score: i32 = all_proto_words
+            .iter()
+            .map(|words| score_instruction_words(words, format))
+            .sum();
+        if score > best_score {
+            best_score = score;
+            best = format;
+        }
+    }
+    best
 }
 
 pub fn insn_a(raw: u32) -> u8 {
@@ -395,4 +481,16 @@ pub fn jump_target(pc: usize, raw: u32, op: Opcode) -> Option<usize> {
     } else {
         None
     }
+}
+
+pub fn aux_kv(aux: u32) -> u16 {
+    (aux & 0xffffff) as u16
+}
+
+pub fn aux_not(aux: u32) -> bool {
+    (aux >> 31) != 0
+}
+
+pub fn aux_kb(aux: u32) -> bool {
+    (aux & 1) != 0
 }

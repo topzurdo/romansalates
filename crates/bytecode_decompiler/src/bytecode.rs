@@ -1,9 +1,36 @@
 use crate::error::{DecompileError, Result};
-use crate::opcode::Opcode;
-use crate::utils::{read_bytes, read_f32, read_f64, read_u8, read_u32_le, read_varint};
+use crate::opcode::{detect_wire_format, Opcode, WireFormat};
+use crate::utils::{
+    read_bytes, read_f32, read_f64, read_i32_le, read_u8, read_u32_le, read_varint, read_varint64,
+};
+use crate::validate::{validate_chunk_with_options, ValidateOptions};
+
+#[derive(Debug, Clone, Copy)]
+pub struct BytecodeOptions {
+    pub wire: WireFormat,
+    pub lenient: bool,
+}
+
+impl Default for BytecodeOptions {
+    fn default() -> Self {
+        Self {
+            wire: WireFormat::Auto,
+            lenient: true,
+        }
+    }
+}
+
+impl BytecodeOptions {
+    pub fn roblox_strict() -> Self {
+        Self {
+            wire: WireFormat::Roblox227,
+            lenient: false,
+        }
+    }
+}
 
 pub const LBC_VERSION_MIN: u8 = 3;
-pub const LBC_VERSION_MAX: u8 = 8;
+pub const LBC_VERSION_MAX: u8 = 11;
 
 pub const TAG_NIL: u8 = 0;
 pub const TAG_BOOL: u8 = 1;
@@ -15,6 +42,7 @@ pub const TAG_CLOSURE: u8 = 6;
 pub const TAG_VECTOR: u8 = 7;
 pub const TAG_TABLE_CONST: u8 = 8;
 pub const TAG_INTEGER: u8 = 9;
+pub const TAG_CLASS_SHAPE: u8 = 10;
 
 #[derive(Debug, Clone)]
 pub struct Chunk {
@@ -23,6 +51,10 @@ pub struct Chunk {
     pub strings: Vec<String>,
     pub protos: Vec<Proto>,
     pub main_index: usize,
+    pub wire_format: WireFormat,
+    pub warnings: Vec<String>,
+    /// Filled during parse, drained when instructions are decoded (not part of public API).
+    raw_instruction_words: Vec<Vec<u32>>,
 }
 
 #[derive(Debug, Clone)]
@@ -39,6 +71,7 @@ pub struct Proto {
     pub debug_name: Option<String>,
     pub debug_locals: Vec<DebugLocal>,
     pub debug_upvals: Vec<String>,
+    line_map: Vec<i32>,
 }
 
 #[derive(Debug, Clone)]
@@ -54,6 +87,8 @@ pub struct Instruction {
     pub pc: usize,
     pub line: i32,
     pub opcode: Opcode,
+    /// Low byte of the instruction word as stored in the blob (before ×227 decode).
+    pub wire_opcode: u8,
     pub raw: u32,
     pub aux: Option<u32>,
 }
@@ -69,12 +104,58 @@ pub enum Constant {
     Table(Vec<String>),
     Closure(u32),
     Vector([f32; 4]),
+    Unknown { tag: u8 },
 }
 
 pub struct BytecodeReader;
 
 impl BytecodeReader {
     pub fn read(bytes: &[u8]) -> Result<Chunk> {
+        Self::read_with_options(bytes, BytecodeOptions::default())
+    }
+
+    pub fn read_with_options(bytes: &[u8], options: BytecodeOptions) -> Result<Chunk> {
+        let mut chunk = Self::read_unparsed(bytes)?;
+        let wire = match options.wire {
+            WireFormat::Auto => {
+                let slices: Vec<&[u32]> = chunk
+                    .raw_instruction_words
+                    .iter()
+                    .map(|v| v.as_slice())
+                    .collect();
+                detect_wire_format(&slices)
+            }
+            other => other,
+        };
+        let line_maps: Vec<Vec<i32>> = chunk.protos.iter().map(|p| p.line_map.clone()).collect();
+        for ((proto, raw), lines) in chunk
+            .protos
+            .iter_mut()
+            .zip(chunk.raw_instruction_words.drain(..))
+            .zip(line_maps)
+        {
+            proto.instructions = parse_instruction_words(&raw, wire)?;
+            let mut word_idx = 0usize;
+            for inst in &mut proto.instructions {
+                inst.line = *lines.get(word_idx).unwrap_or(&0);
+                word_idx += inst.opcode.word_len();
+            }
+            proto.line_map.clear();
+        }
+        chunk.wire_format = wire;
+        let mut warnings = Vec::new();
+        validate_chunk_with_options(
+            &chunk,
+            ValidateOptions {
+                lenient: options.lenient,
+            },
+            &mut warnings,
+        )?;
+        chunk.warnings = warnings;
+        Ok(chunk)
+    }
+
+    fn read_unparsed(bytes: &[u8]) -> Result<Chunk> {
         let mut offset = 0;
         if bytes.is_empty() {
             return Err(DecompileError::UnexpectedEof);
@@ -88,20 +169,40 @@ impl BytecodeReader {
             return Err(DecompileError::UnsupportedVersion(version));
         }
 
-        let types_version = read_u8(bytes, &mut offset).ok_or(DecompileError::UnexpectedEof)?;
+        let types_version = if version >= 4 {
+            read_u8(bytes, &mut offset).ok_or(DecompileError::UnexpectedEof)?
+        } else {
+            0
+        };
         let strings = Self::read_string_table(bytes, &mut offset)?;
         Self::skip_userdata_type_map(bytes, &mut offset, version)?;
 
         let func_count = read_varint(bytes, &mut offset).ok_or(DecompileError::UnexpectedEof)? as usize;
         let mut protos = Vec::with_capacity(func_count);
-        for _ in 0..func_count {
-            protos.push(Self::read_proto_at(bytes, &mut offset, &strings, version, types_version)?);
+        let mut raw_instruction_words = Vec::with_capacity(func_count);
+        for i in 0..func_count {
+            let (proto, raw) = Self::read_proto_at(bytes, &mut offset, &strings, version, types_version)
+                .map_err(|e| match e {
+                    DecompileError::Malformed(msg) => {
+                        DecompileError::Message(format!("proto {i}: {msg}"))
+                    }
+                    other => other,
+                })?;
+            raw_instruction_words.push(raw);
+            protos.push(proto);
         }
 
-        let main_index = read_varint(bytes, &mut offset).ok_or(DecompileError::UnexpectedEof)? as usize;
-        if main_index >= func_count {
-            return Err(DecompileError::Malformed("main proto index out of range"));
-        }
+        let main_index = match read_varint(bytes, &mut offset) {
+            Some(idx) => idx as usize,
+            None => 0,
+        };
+        let main_index = if protos.is_empty() {
+            0
+        } else if main_index >= protos.len() {
+            protos.len() - 1
+        } else {
+            main_index
+        };
 
         Ok(Chunk {
             version,
@@ -109,6 +210,9 @@ impl BytecodeReader {
             strings,
             protos,
             main_index,
+            wire_format: WireFormat::Auto,
+            warnings: Vec::new(),
+            raw_instruction_words,
         })
     }
 
@@ -118,7 +222,7 @@ impl BytecodeReader {
         strings: &[String],
         version: u8,
         types_version: u8,
-    ) -> Result<Proto> {
+    ) -> Result<(Proto, Vec<u32>)> {
         Self::read_proto_inner(bytes, offset, strings, version, types_version)
     }
 
@@ -153,7 +257,7 @@ impl BytecodeReader {
         strings: &[String],
         version: u8,
         types_version: u8,
-    ) -> Result<Proto> {
+    ) -> Result<(Proto, Vec<u32>)> {
         let max_stack = read_u8(bytes, offset).ok_or(DecompileError::UnexpectedEof)?;
         let num_params = read_u8(bytes, offset).ok_or(DecompileError::UnexpectedEof)?;
         let num_upvalues = read_u8(bytes, offset).ok_or(DecompileError::UnexpectedEof)?;
@@ -185,34 +289,6 @@ impl BytecodeReader {
             raw_words.push(read_u32_le(bytes, offset).ok_or(DecompileError::UnexpectedEof)?);
         }
 
-        let mut instructions = Vec::new();
-        let mut idx = 0usize;
-        let mut pc = 0usize;
-        while idx < raw_words.len() {
-            let word_idx = idx;
-            let raw = raw_words[idx];
-            let op = Opcode::from_u8((raw & 0xff) as u8);
-            let aux = if op.has_aux() {
-                idx += 1;
-                if idx >= raw_words.len() {
-                    return Err(DecompileError::Malformed("missing aux word"));
-                }
-                Some(raw_words[idx])
-            } else {
-                None
-            };
-            instructions.push(Instruction {
-                pc,
-                line: 0,
-                opcode: op,
-                raw,
-                aux,
-            });
-            pc += 1;
-            idx += 1;
-            let _ = word_idx;
-        }
-
         let const_count = read_varint(bytes, offset).ok_or(DecompileError::UnexpectedEof)? as usize;
         let mut constants = Vec::with_capacity(const_count);
         for _ in 0..const_count {
@@ -226,8 +302,8 @@ impl BytecodeReader {
         }
 
         let line_defined = read_varint(bytes, offset).ok_or(DecompileError::UnexpectedEof)?;
-        let debug_name_idx = read_varint(bytes, offset).ok_or(DecompileError::UnexpectedEof)? as usize;
-        let debug_name = strings.get(debug_name_idx).cloned();
+        let debug_name_idx = read_varint(bytes, offset).ok_or(DecompileError::UnexpectedEof)?;
+        let debug_name = resolve_string_index(strings, debug_name_idx);
 
         let has_lines = read_u8(bytes, offset).ok_or(DecompileError::UnexpectedEof)? != 0;
         let word_lines = if has_lines {
@@ -236,12 +312,6 @@ impl BytecodeReader {
             vec![0; word_count]
         };
 
-        let mut word_idx = 0usize;
-        for inst in &mut instructions {
-            inst.line = *word_lines.get(word_idx).unwrap_or(&0);
-            word_idx += inst.opcode.word_len();
-        }
-
         let has_debug = read_u8(bytes, offset).ok_or(DecompileError::UnexpectedEof)? != 0;
         let (debug_locals, debug_upvals) = if has_debug {
             Self::read_debug_info(bytes, offset, strings)?
@@ -249,20 +319,28 @@ impl BytecodeReader {
             (Vec::new(), Vec::new())
         };
 
-        Ok(Proto {
-            max_stack,
-            num_params,
-            num_upvalues,
-            is_vararg,
-            flags,
-            instructions,
-            constants,
-            child_indices,
-            line_defined,
-            debug_name,
-            debug_locals,
-            debug_upvals,
-        })
+        if version >= 11 {
+            Self::skip_feedback_vector(bytes, offset)?;
+        }
+
+        Ok((
+            Proto {
+                max_stack,
+                num_params,
+                num_upvalues,
+                is_vararg,
+                flags,
+                instructions: Vec::new(),
+                constants,
+                child_indices,
+                line_defined,
+                debug_name,
+                debug_locals,
+                debug_upvals,
+                line_map: word_lines,
+            },
+            raw_words,
+        ))
     }
 
     fn read_constant(bytes: &[u8], offset: &mut usize, strings: &[String], version: u8) -> Result<Constant> {
@@ -275,8 +353,10 @@ impl BytecodeReader {
             }
             TAG_NUMBER => Ok(Constant::Number(read_f64(bytes, offset).ok_or(DecompileError::UnexpectedEof)?)),
             TAG_STRING => {
-                let idx = read_varint(bytes, offset).ok_or(DecompileError::UnexpectedEof)? as usize;
-                Ok(Constant::String(strings.get(idx).cloned().unwrap_or_default()))
+                let idx = read_varint(bytes, offset).ok_or(DecompileError::UnexpectedEof)?;
+                Ok(Constant::String(
+                    resolve_string_index(strings, idx).unwrap_or_default(),
+                ))
             }
             TAG_IMPORT => {
                 let ids = read_u32_le(bytes, offset).ok_or(DecompileError::UnexpectedEof)?;
@@ -286,8 +366,8 @@ impl BytecodeReader {
                 let len = read_varint(bytes, offset).ok_or(DecompileError::UnexpectedEof)? as usize;
                 let mut keys = Vec::with_capacity(len);
                 for _ in 0..len {
-                    let k = read_varint(bytes, offset).ok_or(DecompileError::UnexpectedEof)? as usize;
-                    keys.push(strings.get(k).cloned().unwrap_or_default());
+                    let k = read_varint(bytes, offset).ok_or(DecompileError::UnexpectedEof)?;
+                    keys.push(format!("k{k}"));
                 }
                 Ok(Constant::Table(keys))
             }
@@ -303,53 +383,76 @@ impl BytecodeReader {
                 Ok(Constant::Vector([x, y, z, w]))
             }
             TAG_TABLE_CONST if version >= 7 => {
-                let _len = read_varint(bytes, offset).ok_or(DecompileError::UnexpectedEof)?;
-                Ok(Constant::Table(Vec::new()))
+                let key_count = read_varint(bytes, offset).ok_or(DecompileError::UnexpectedEof)? as usize;
+                let mut keys = Vec::with_capacity(key_count);
+                for _ in 0..key_count {
+                    let key_k = read_varint(bytes, offset).ok_or(DecompileError::UnexpectedEof)?;
+                    let _value_k = read_i32_le(bytes, offset).ok_or(DecompileError::UnexpectedEof)?;
+                    keys.push(format!("k{key_k}"));
+                }
+                Ok(Constant::Table(keys))
             }
             TAG_INTEGER if version >= 8 => {
-                let lo = read_u32_le(bytes, offset).ok_or(DecompileError::UnexpectedEof)? as u64;
-                let hi = read_u32_le(bytes, offset).ok_or(DecompileError::UnexpectedEof)? as u64;
-                Ok(Constant::Integer(((hi << 32) | lo) as i64))
+                let negative = read_u8(bytes, offset).ok_or(DecompileError::UnexpectedEof)? != 0;
+                let magnitude = read_varint64(bytes, offset).ok_or(DecompileError::UnexpectedEof)?;
+                let value = if negative {
+                    -(magnitude as i64)
+                } else {
+                    magnitude as i64
+                };
+                Ok(Constant::Integer(value))
             }
-            _ => Err(DecompileError::Malformed("unknown constant tag")),
+            TAG_CLASS_SHAPE if version >= 10 => {
+                let _class_name_k =
+                    read_varint(bytes, offset).ok_or(DecompileError::UnexpectedEof)?;
+                let num_properties =
+                    read_varint(bytes, offset).ok_or(DecompileError::UnexpectedEof)? as usize;
+                let num_methods =
+                    read_varint(bytes, offset).ok_or(DecompileError::UnexpectedEof)? as usize;
+                let member_count = num_properties.saturating_add(num_methods);
+                for _ in 0..member_count {
+                    read_varint(bytes, offset).ok_or(DecompileError::UnexpectedEof)?;
+                }
+                Ok(Constant::String("<class_shape>".into()))
+            }
+            _ => Ok(Constant::Unknown { tag }),
         }
     }
 
     fn read_line_info(bytes: &[u8], offset: &mut usize, word_count: usize) -> Result<Vec<i32>> {
         let line_gap_log2 = read_u8(bytes, offset).ok_or(DecompileError::UnexpectedEof)? as u32;
-        let baseline_size = ((word_count.saturating_sub(1)) >> line_gap_log2) + 1;
+        let intervals = ((word_count.saturating_sub(1)) >> line_gap_log2) + 1;
 
-        let mut small = Vec::with_capacity(word_count);
-        let mut last_offset = 0i32;
+        let mut line_deltas = Vec::with_capacity(word_count);
+        let mut last_offset = 0u32;
         for _ in 0..word_count {
-            let byte = read_u8(bytes, offset).ok_or(DecompileError::UnexpectedEof)? as i8 as i32;
-            last_offset += byte;
-            small.push(last_offset);
+            last_offset += read_u8(bytes, offset).ok_or(DecompileError::UnexpectedEof)? as u32;
+            line_deltas.push(last_offset);
         }
 
-        let mut abs = Vec::with_capacity(baseline_size);
-        let mut last_line = 0i32;
-        for _ in 0..baseline_size {
-            let delta = read_u32_le(bytes, offset).ok_or(DecompileError::UnexpectedEof)? as i32;
-            last_line += delta;
-            abs.push(last_line);
+        let mut abs_lines = Vec::with_capacity(intervals);
+        let mut last_line = 0u32;
+        for _ in 0..intervals {
+            last_line = last_line.wrapping_add(read_u32_le(bytes, offset).ok_or(DecompileError::UnexpectedEof)?);
+            abs_lines.push(last_line);
         }
 
         let mut lines = vec![0i32; word_count];
         for (i, line) in lines.iter_mut().enumerate() {
-            let abs_index = (i as u32) >> line_gap_log2;
-            let mut result = small[i] + abs[abs_index as usize];
-            if line_gap_log2 <= 1 && -small[i] == abs[abs_index as usize] {
-                if let Some(next) = abs.get(abs_index as usize + 1) {
-                    result += *next;
-                }
-            }
-            if result <= 0 {
-                result += 0x100;
-            }
-            *line = result;
+            let abs_index = (i >> line_gap_log2).min(abs_lines.len().saturating_sub(1));
+            let baseline = abs_lines.get(abs_index).copied().unwrap_or(0);
+            *line = (baseline + line_deltas[i]) as i32;
         }
         Ok(lines)
+    }
+
+    fn skip_feedback_vector(bytes: &[u8], offset: &mut usize) -> Result<()> {
+        let count = read_varint(bytes, offset).ok_or(DecompileError::UnexpectedEof)? as usize;
+        for _ in 0..count {
+            read_u8(bytes, offset).ok_or(DecompileError::UnexpectedEof)?;
+            read_varint(bytes, offset).ok_or(DecompileError::UnexpectedEof)?;
+        }
+        Ok(())
     }
 
     fn read_debug_info(
@@ -360,12 +463,13 @@ impl BytecodeReader {
         let local_count = read_varint(bytes, offset).ok_or(DecompileError::UnexpectedEof)? as usize;
         let mut debug_locals = Vec::with_capacity(local_count);
         for _ in 0..local_count {
-            let name_idx = read_varint(bytes, offset).ok_or(DecompileError::UnexpectedEof)? as usize;
+            let name_idx = read_varint(bytes, offset).ok_or(DecompileError::UnexpectedEof)?;
             let start_pc = read_varint(bytes, offset).ok_or(DecompileError::UnexpectedEof)?;
             let end_pc = read_varint(bytes, offset).ok_or(DecompileError::UnexpectedEof)?;
             let reg = read_u8(bytes, offset).ok_or(DecompileError::UnexpectedEof)?;
             debug_locals.push(DebugLocal {
-                name: strings.get(name_idx).cloned().unwrap_or_else(|| format!("local_{reg}")),
+                name: resolve_string_index(strings, name_idx)
+                    .unwrap_or_else(|| format!("local_{reg}")),
                 start_pc,
                 end_pc,
                 reg,
@@ -375,17 +479,98 @@ impl BytecodeReader {
         let upval_count = read_varint(bytes, offset).ok_or(DecompileError::UnexpectedEof)? as usize;
         let mut debug_upvals = Vec::with_capacity(upval_count);
         for _ in 0..upval_count {
-            let name_idx = read_varint(bytes, offset).ok_or(DecompileError::UnexpectedEof)? as usize;
+            let name_idx = read_varint(bytes, offset).ok_or(DecompileError::UnexpectedEof)?;
             debug_upvals.push(
-                strings
-                    .get(name_idx)
-                    .cloned()
+                resolve_string_index(strings, name_idx)
                     .unwrap_or_else(|| format!("upval_{}", debug_upvals.len())),
             );
         }
 
         Ok((debug_locals, debug_upvals))
     }
+}
+
+/// Decode a proto instruction stream (Roblox-encoded opcodes in the low byte of each word).
+#[cfg(test)]
+mod instruction_tests {
+    use super::parse_instruction_words;
+    use crate::opcode::{Opcode, WireFormat};
+
+    fn word(op: u8, a: u8, b: u8, c: u8) -> u32 {
+        let op = Opcode::encode_u8(op);
+        u32::from(op) | (u32::from(a) << 8) | (u32::from(b) << 16) | (u32::from(c) << 24)
+    }
+
+    #[test]
+    fn callfb_and_new_class_member_consume_aux_word() {
+        let raw = [
+            word(87, 0, 2, 1),
+            5,
+            word(86, 1, 0, 2),
+            3,
+            word(22, 0, 1, 0),
+        ];
+        let inst = parse_instruction_words(&raw, WireFormat::Roblox227).expect("parse");
+        assert_eq!(inst.len(), 3);
+        assert_eq!(inst[0].opcode, Opcode::CallFb);
+        assert_eq!(inst[0].aux, Some(5));
+        assert_eq!(inst[1].opcode, Opcode::NewClassMember);
+        assert_eq!(inst[1].aux, Some(3));
+        assert_eq!(inst[2].opcode, Opcode::Return);
+    }
+
+    #[test]
+    fn rejects_stream_without_required_aux() {
+        let raw = [word(87, 0, 2, 1)];
+        assert!(parse_instruction_words(&raw, WireFormat::Roblox227).is_err());
+    }
+}
+
+/// Luau string table indices are 1-based; 0 means empty / absent.
+fn resolve_string_index(strings: &[String], index: u32) -> Option<String> {
+    if index == 0 {
+        return None;
+    }
+    strings.get((index - 1) as usize).cloned()
+}
+
+pub fn parse_instruction_words(raw_words: &[u32], wire: WireFormat) -> Result<Vec<Instruction>> {
+    let mut instructions = Vec::new();
+    let mut idx = 0usize;
+    let mut pc = 0usize;
+    while idx < raw_words.len() {
+        let raw = raw_words[idx];
+        let wire_opcode = (raw & 0xff) as u8;
+        let op = Opcode::from_wire_byte(wire_opcode, wire);
+        let aux = if op.has_aux() {
+            idx += 1;
+            if idx >= raw_words.len() {
+                return Err(DecompileError::Malformed(
+                    "instruction stream ended before AUX word",
+                ));
+            }
+            Some(raw_words[idx])
+        } else {
+            None
+        };
+        instructions.push(Instruction {
+            pc,
+            line: 0,
+            opcode: op,
+            wire_opcode,
+            raw,
+            aux,
+        });
+        pc += 1;
+        idx += 1;
+    }
+    let consumed: usize = instructions.iter().map(|i| i.opcode.word_len()).sum();
+    if consumed != raw_words.len() {
+        return Err(DecompileError::Malformed(
+            "instruction word count does not match decoded instruction lengths",
+        ));
+    }
+    Ok(instructions)
 }
 
 pub fn resolve_import(ids: u32, constants: &[Constant]) -> String {
@@ -414,7 +599,7 @@ pub fn resolve_import_aux(aux: u32, constants: &[Constant]) -> String {
         if count > 1 { Some(((aux >> 10) & 0x3ff) as usize) } else { None },
         if count > 2 { Some((aux & 0x3ff) as usize) } else { None },
     ];
-    indices
+    let path: String = indices
         .into_iter()
         .flatten()
         .filter_map(|i| constants.get(i))
@@ -423,7 +608,17 @@ pub fn resolve_import_aux(aux: u32, constants: &[Constant]) -> String {
             other => format_constant(other),
         })
         .collect::<Vec<_>>()
-        .join(".")
+        .join(".");
+    if !path.is_empty() {
+        return path;
+    }
+    if let Some(Constant::Import(id)) = constants.get((aux & 0x3ff) as usize) {
+        return resolve_import(*id, constants);
+    }
+    if let Some(Constant::String(s)) = constants.get((aux & 0x3ff) as usize) {
+        return s.clone();
+    }
+    format!("import_{aux:08X}")
 }
 
 pub fn format_constant(c: &Constant) -> String {
@@ -449,6 +644,7 @@ pub fn format_constant(c: &Constant) -> String {
         ),
         Constant::Closure(idx) => format!("<closure:{idx}>"),
         Constant::Vector(v) => format!("vector.create({}, {}, {})", v[0], v[1], v[2]),
+        Constant::Unknown { tag } => format!("<const:{tag:02X}>"),
     }
 }
 

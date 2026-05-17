@@ -42,3 +42,24 @@ pub fn read_varint(bytes: &[u8], offset: &mut usize) -> Option<u32> {
     }
     Some(result)
 }
+
+pub fn read_varint64(bytes: &[u8], offset: &mut usize) -> Option<u64> {
+    let mut result = 0u64;
+    let mut shift = 0;
+    loop {
+        let b = read_u8(bytes, offset)?;
+        result |= ((b & 0x7f) as u64) << shift;
+        if (b & 0x80) == 0 {
+            break;
+        }
+        shift += 7;
+        if shift > 70 {
+            return None;
+        }
+    }
+    Some(result)
+}
+
+pub fn read_i32_le(bytes: &[u8], offset: &mut usize) -> Option<i32> {
+    Some(read_u32_le(bytes, offset)? as i32)
+}
