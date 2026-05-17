@@ -24,7 +24,7 @@ local EmbeddedModules = {
 	Explorer = function()
 --[[
 	Explorer App Module
-	
+
 	The main explorer interface
 ]]
 
@@ -675,7 +675,7 @@ local EmbeddedModules = {
 			end
 
 			Explorer.Refresh = function()
-				local maxNodes = math.max(math.ceil((treeFrame.AbsoluteSize.Y) / 20), 0)	
+				local maxNodes = math.max(math.ceil((treeFrame.AbsoluteSize.Y) / 20), 0)
 				local renameNodeVisible = false
 				local isa = game.IsA
 
@@ -1355,7 +1355,7 @@ local EmbeddedModules = {
 				end})
 
                 context:Register("VIEW_CONNECTIONS",{Name = "View Connections", OnClick = function()
-                    
+
                 end})
 
 				context:Register("VIEW_API",{Name = "View API Page", IconMap = Explorer.MiscIcons, Icon = "Reference", OnClick = function()
@@ -1405,7 +1405,7 @@ local EmbeddedModules = {
 					for _, v in next, selection.List do
 						if v.Obj:IsA("LuaSourceContainer") and env.isViableDecompileScript(v.Obj) then
 							local success, source = pcall(env.decompile, v.Obj)
-							if not success or not source then source = ("-- DEX - failed to decompile %s"):format(v.Obj.ClassName) end
+							if not success or not source then source = ("-- DEX - failed to decompile %s\n-- Error: %s"):format(v.Obj.ClassName, tostring(source)) end
 							local fileName = ("%i.%s.%s.Source.txt"):format(game.PlaceId, v.Obj.ClassName, env.parsefile(v.Obj.Name))
 							env.writefile(fileName, source)
 							task.wait(0.2)
@@ -1568,7 +1568,7 @@ local EmbeddedModules = {
 				disconnect(obj[2])
 			end
 		end
-		
+
 		for obj in next,newNilRoots do
 			if not nilRoots[obj] then
 				nilRoots[obj] = {
@@ -1804,19 +1804,19 @@ local EmbeddedModules = {
 		--[=[if #query > 0 then
 			local expandTable = Explorer.SearchExpanded
 			local specFilters
-			
+
 			local lower = string.lower
 			local find = string.find
 			local tostring = tostring
-			
+
 			local lowerQuery = lower(query)
-			
+
 			local function defaultSearch(root)
 				local expandedpar = false
 				for i = 1,#root do
 					local node = root[i]
 					local obj = node.Obj
-					
+
 					if find(lower(tostring(obj)),lowerQuery,1,true) then
 						expandTable[node] = 0
 						searchResults[node] = true
@@ -1830,9 +1830,9 @@ local EmbeddedModules = {
 							expandedpar = true
 						end
 					elseif ExplorerSearch[lower(tostring(obj))] then
-						
+
 					end
-					
+
 					if #node > 0 then defaultSearch(node) end
 				end
 			end
@@ -1859,7 +1859,7 @@ local EmbeddedModules = {
 					end
 				end
 			end
-			
+
 			if searchFunc then
 				local start = tick()
 				searchFunc(nodes[game])
@@ -2171,7 +2171,7 @@ local EmbeddedModules = {
 				Explorer.GuiElems.ToolBar = toolBar
 				Explorer.GuiElems.TreeFrame = treeFrame
 
-				scrollV = Lib.ScrollBar.new()		
+				scrollV = Lib.ScrollBar.new()
 				scrollV.WheelIncrement = 3
 				scrollV.Gui.Position = UDim2.new(1,-16,0,23)
 				scrollV:SetScrollFrame(treeFrame)
@@ -2279,7 +2279,7 @@ local EmbeddedModules = {
 	Properties = function()
 --[[
 	Properties App Module
-	
+
 	The main properties interface
 ]]
 
@@ -3013,7 +3013,7 @@ local EmbeddedModules = {
 					local prop = viewList[index + Properties.Index]
 					if not prop then return end
 					if (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) and not nameFrame.PropName.TextFits then
-						local fullNameFrame = Properties.FullNameFrame	
+						local fullNameFrame = Properties.FullNameFrame
 						local nameArr = string.split(prop.Class.."."..prop.Name..(prop.SubName or ""), ".")
 						local dispName = prop.DisplayName or nameArr[#nameArr]
 						local sizeX = service.TextService:GetTextSize(dispName, 14, Enum.Font.SourceSans, Vector2.new(math.huge, 20)).X
@@ -3665,7 +3665,7 @@ local EmbeddedModules = {
 			end
 
 			Properties.Refresh = function()
-				local maxEntries = math.max(math.ceil((propsFrame.AbsoluteSize.Y) / 23),0)	
+				local maxEntries = math.max(math.ceil((propsFrame.AbsoluteSize.Y) / 23),0)
 				local maxX = propsFrame.AbsoluteSize.X
 				local valueWidth = math.max(Properties.MinInputWidth,maxX-Properties.ViewWidth)
 				local inputPropVisible = false
@@ -4166,7 +4166,7 @@ local EmbeddedModules = {
 				end)
 
 				-- Init scrollbars
-				scrollV = Lib.ScrollBar.new()		
+				scrollV = Lib.ScrollBar.new()
 				scrollV.WheelIncrement = 3
 				scrollV.Gui.Position = UDim2.new(1,-16,0,23)
 				scrollV:SetScrollFrame(propsFrame)
@@ -4202,7 +4202,7 @@ local EmbeddedModules = {
 	ScriptViewer = function()
 --[[
 	Script Viewer App Module
-	
+
 	A script viewer that is basically a notepad
 ]]
 
@@ -4240,7 +4240,12 @@ local EmbeddedModules = {
 
 			ScriptViewer.ViewScript = function(scr)
 				local success, source = pcall(env.decompile, scr)
-				if not success or not source then source, PreviousScr = ("-- DEX - %s failed to decompile %s"):format(env.executor, scr.ClassName), nil else PreviousScr = scr end
+				if not success or not source then
+					source = ("-- DEX - %s failed to decompile %s\n-- Error: %s"):format(env.executor, scr.ClassName, tostring(source))
+					PreviousScr = nil
+				else
+					PreviousScr = scr
+				end
 				codeFrame:SetText(source:gsub("\0", "\\0"))
 				window:Show()
 			end
@@ -4390,7 +4395,7 @@ local EmbeddedModules = {
 	Lib = function()
 --[[
 	Lib Module
-	
+
 	Container for functions and classes
 ]]
 
@@ -4442,7 +4447,7 @@ local EmbeddedModules = {
 						else
 							res[i] = v
 						end
-					end		
+					end
 					return res
 				end
 
@@ -4479,7 +4484,7 @@ local EmbeddedModules = {
 				if gui == nil then return false end
 				local mouse = Main.Mouse
 				local guiPosition = gui.AbsolutePosition
-				local guiSize = gui.AbsoluteSize	
+				local guiSize = gui.AbsoluteSize
 
 				return mouse.X >= guiPosition.X and mouse.X < guiPosition.X + guiSize.X and mouse.Y >= guiPosition.Y and mouse.Y < guiPosition.Y + guiSize.Y
 			end
@@ -4588,7 +4593,7 @@ local EmbeddedModules = {
 							txt = txt:match'^%s*(.*%S)' or ''
 							if #txt ~= 0 then
 								t[#t+1] = {text=txt}
-							end		
+							end
 						end
 
 						s:gsub('<([?!/]?)([-:_%w]+)%s*(/?>?)([^<]*)', function(type, name, closed, txt)
@@ -4867,7 +4872,7 @@ local EmbeddedModules = {
 				end
 
 				funcs.Connect = function(self,func)
-					if type(func) ~= "function" then error("Attempt to connect a non-function") end		
+					if type(func) ~= "function" then error("Attempt to connect a non-function") end
 					local con = {
 						Signal = self,
 						Func = func,
@@ -7061,7 +7066,7 @@ local EmbeddedModules = {
 
 				local keywords = {
 					["and"] = true,
-					["break"] = true, 
+					["break"] = true,
 					["do"] = true,
 					["else"] = true,
 					["elseif"] = true,
@@ -7264,7 +7269,7 @@ local EmbeddedModules = {
 
 								if sel2Y < selY or (sel2Y == selY and sel2X < selX) then
 									obj.SelectionRange = {{sel2X, sel2Y}, {selX, selY}}
-								else						
+								else
 									obj.SelectionRange = {{selX, selY}, {sel2X, sel2Y}}
 								end
 
@@ -7397,7 +7402,7 @@ local EmbeddedModules = {
 					local leftSub = lines[selY+1]:sub(selX+1)
 					local rightSub = lines[sel2Y+1]:sub(1,sel2X)
 
-					local result = leftSub.."\n" 
+					local result = leftSub.."\n"
 					for i = selY+1,sel2Y-1 do
 						result = result..lines[i+1].."\n"
 					end
@@ -7655,7 +7660,7 @@ local EmbeddedModules = {
 					return 0
 				end
 
-				funcs.SetEditing = function(self,on,input)			
+				funcs.SetEditing = function(self,on,input)
 					self:UpdateCursor(input)
 
 					if on then
@@ -7705,7 +7710,7 @@ local EmbeddedModules = {
 
 				funcs.UpdateCursor = function(self,input)
 					local linesFrame = self.GuiElems.LinesFrame
-					local cursor = self.GuiElems.Cursor			
+					local cursor = self.GuiElems.Cursor
 					local hSize = math.max(0,linesFrame.AbsoluteSize.X)
 					local vSize = math.max(0,linesFrame.AbsoluteSize.Y)
 					local maxLines = math.ceil(vSize / self.FontSize)
@@ -8202,7 +8207,7 @@ local EmbeddedModules = {
 					end
 
 					self.MaxTextCols = maxCols
-					self:UpdateView()	
+					self:UpdateView()
 					self.Text = table.concat(self.Lines,"\n")
 					self:MapNewLines()
 					self:PreHighlight()
@@ -8426,7 +8431,7 @@ local EmbeddedModules = {
 								else
 									self:Paint()
 								end
-								
+
 								self.OnInput:Fire()
 							end
 						end
@@ -8954,7 +8959,7 @@ local EmbeddedModules = {
 					local function colorStripInput()
 						local relativeY = mouse.Y - colorStrip.AbsolutePosition.Y
 
-						if relativeY < 0 then relativeY = 0 elseif relativeY > 199 then relativeY = 199 end	
+						if relativeY < 0 then relativeY = 0 elseif relativeY > 199 then relativeY = 199 end
 
 						val = (199 - relativeY) / 199
 
@@ -9031,7 +9036,7 @@ local EmbeddedModules = {
 					number = math.clamp(math.floor(number), 0, Value) / Value
 					local HSV = Color3.fromHSV(func(number))
 					red, green, blue = HSV.R, HSV.G, HSV.B
-					
+
 					TextBox.Text = tostring(number):sub(4)
 					updateColor(IsHSV)
 				end
@@ -9427,8 +9432,8 @@ local EmbeddedModules = {
 
 						newSelect.InputBegan:Connect(function(input)
 							if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
-								for i, v in pairs(points) do 
-									v[4].Select.BackgroundTransparency = 1 
+								for i, v in pairs(points) do
+									v[4].Select.BackgroundTransparency = 1
 								end
 
 								newSelect.BackgroundTransparency = 0
@@ -9474,8 +9479,8 @@ local EmbeddedModules = {
 										newMt:Redraw()
 										updateInputs(point)
 
-										for i, v in pairs(points) do 
-											v[4].Select.BackgroundTransparency = 1 
+										for i, v in pairs(points) do
+											v[4].Select.BackgroundTransparency = 1
 										end
 
 										newSelect.BackgroundTransparency = 0
@@ -9533,7 +9538,7 @@ local EmbeddedModules = {
 
 								local envPercent = (lineCount-fromPoint[4].Position.X.Offset)/(toPoint[4].Position.X.Offset-fromPoint[4].Position.X.Offset)
 								local envLerp = fromEnvelope+(nextEnvelope-fromEnvelope)*envPercent
-								local relativeSize = (envLerp/10)*numberLineSize.Y						
+								local relativeSize = (envLerp/10)*numberLineSize.Y
 
 								local line = eLines[lineCount + 3]
 								if line then
@@ -9850,7 +9855,7 @@ local EmbeddedModules = {
 							local nextColor = colors[i]
 							local endPos = math.floor((colorLine.AbsoluteSize.X-1) * nextColor[2]) + 1
 							nextColor[3].Position = UDim2.new(0,endPos,0,0)
-						end		
+						end
 					end
 					newMt.Redraw = redraw
 
@@ -11959,7 +11964,7 @@ Main = (function()
 		if Main.Elevated then
 			if Main.LocalDepsUpToDate() then
 				local localAPI = Lib.ReadFile("dex/rbx_api.dat")
-				if localAPI then 
+				if localAPI then
 					rawAPI = localAPI
 				else
 					Main.DepsVersionData[1] = ""
@@ -12114,7 +12119,7 @@ Main = (function()
 		if Main.Elevated then
 			if Main.LocalDepsUpToDate() then
 				local localRMD = Lib.ReadFile("dex/rbx_rmd.dat")
-				if localRMD then 
+				if localRMD then
 					rawXML = localRMD
 				else
 					Main.DepsVersionData[1] = ""
