@@ -34,11 +34,14 @@ function bytecodeDecompile(script)
 			mode = "decompile",
 		}),
 	})
-	if type(res) ~= "table" or not res.Body then
+	if type(res) ~= "table" or not res.Body or (res.StatusCode and res.StatusCode ~= 200) then
 		return "-- bytecode_decompiler not reachable (run bytecode_decompiler.exe)"
 	end
-	local body = HttpService:JSONDecode(res.Body)
-	if body.ok then
+	local decodeOk, body = pcall(HttpService.JSONDecode, HttpService, res.Body)
+	if not decodeOk or type(body) ~= "table" then
+		return "-- invalid response from decompiler"
+	end
+	if body.ok and type(body.code) == "string" then
 		return body.code
 	end
 	return "-- decompile error: " .. tostring(body.error or "unknown")

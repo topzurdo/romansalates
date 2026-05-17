@@ -2949,17 +2949,17 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 
 	local function siDecompileScript(script)
 		if not getbytecode then
-			return false, "getscriptbytecode is not available"
+			error("getscriptbytecode is not available")
 		end
 		local s, bytecode = getbytecode(script)
 		if not s or type(bytecode) ~= "string" or bytecode == "" then
-			return false, "failed to read bytecode (empty or unavailable)"
+			error("failed to read bytecode (empty or unavailable)")
 		end
 		local code, err = siDecompileBytecode(bytecode)
 		if code then
-			return true, code
+			return code
 		end
-		return false, err or "decompile failed"
+		error(err or "decompile failed")
 	end
 
 	local Decompiler
@@ -3014,11 +3014,13 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 				end
 
 				local output
-				if ok then
+				if ok and type(result) == "string" then
 					result = string.gsub(result, "\0", "\\0") -- ? Some decompilers sadly output \0 which prevents files from opening
 					output = result
 				else
-					output = "--[[ Failed to decompile. Reason:\n" .. (result or "") .. "\n]]"
+					output = "--[[ Failed to decompile. Reason:\n"
+						.. tostring(result or "Empty Output")
+						.. "\n]]"
 				end
 
 				if ScriptCache and bytecode then -- TODO there might(?) be an edgecase where it manages to decompile (built-in) even though getscriptbytecode failed, and the output won't get cached
