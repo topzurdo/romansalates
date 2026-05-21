@@ -367,7 +367,7 @@ impl BytecodeReader {
                 let mut keys = Vec::with_capacity(len);
                 for _ in 0..len {
                     let k = read_varint(bytes, offset).ok_or(DecompileError::UnexpectedEof)?;
-                    keys.push(format!("k{k}"));
+                    keys.push(table_key_name(strings, k));
                 }
                 Ok(Constant::Table(keys))
             }
@@ -388,7 +388,7 @@ impl BytecodeReader {
                 for _ in 0..key_count {
                     let key_k = read_varint(bytes, offset).ok_or(DecompileError::UnexpectedEof)?;
                     let _value_k = read_i32_le(bytes, offset).ok_or(DecompileError::UnexpectedEof)?;
-                    keys.push(format!("k{key_k}"));
+                    keys.push(table_key_name(strings, key_k));
                 }
                 Ok(Constant::Table(keys))
             }
@@ -534,6 +534,11 @@ fn resolve_string_index(strings: &[String], index: u32) -> Option<String> {
     strings.get((index - 1) as usize).cloned()
 }
 
+/// Resolve a table-template key index to a field name (DupTable / TAG_TABLE constants).
+fn table_key_name(strings: &[String], index: u32) -> String {
+    resolve_string_index(strings, index).unwrap_or_else(|| format!("k{index}"))
+}
+
 pub fn parse_instruction_words(raw_words: &[u32], wire: WireFormat) -> Result<Vec<Instruction>> {
     let mut instructions = Vec::new();
     let mut idx = 0usize;
@@ -646,6 +651,24 @@ pub fn format_constant(c: &Constant) -> String {
         Constant::Vector(v) => format!("vector.create({}, {}, {})", v[0], v[1], v[2]),
         Constant::Unknown { tag } => format!("<const:{tag:02X}>"),
     }
+}
+
+/// Always wraps `s` in double quotes (for Roblox API string args like GetService).
+pub fn format_lua_string_quoted(s: &str) -> String {
+    let mut out = String::from('"');
+    for ch in s.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c.is_ascii() => out.push(c),
+            c => out.push_str(&format!("\\u{{{:04x}}}", c as u32)),
+        }
+    }
+    out.push('"');
+    out
 }
 
 pub fn format_lua_string(s: &str) -> String {

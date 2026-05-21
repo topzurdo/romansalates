@@ -457,30 +457,74 @@ pub fn insn_c(raw: u32) -> u8 {
 }
 
 pub fn insn_d(raw: u32) -> i32 {
-    (raw as i32) >> 16
+    ((raw >> 16) as u16) as i16 as i32
 }
 
 pub fn insn_e(raw: u32) -> i32 {
     (raw as i32) >> 8
 }
 
-pub fn jump_target(pc: usize, raw: u32, op: Opcode) -> Option<usize> {
-    if op.is_jump_d() {
-        let d = insn_d(raw);
-        Some((pc as i32 + d + 1) as usize)
+/// Word index where each logical instruction begins (Luau `code` array offsets).
+pub fn instruction_word_starts(instructions: &[crate::bytecode::Instruction]) -> Vec<usize> {
+    let mut starts = Vec::with_capacity(instructions.len());
+    let mut word = 0usize;
+    for inst in instructions {
+        starts.push(word);
+        word += inst.opcode.word_len();
+    }
+    starts
+}
+
+pub fn total_instruction_words(instructions: &[crate::bytecode::Instruction]) -> usize {
+    instructions.iter().map(|i| i.opcode.word_len()).sum()
+}
+
+fn word_to_inst_pc(target_word: usize, word_starts: &[usize]) -> usize {
+    match word_starts.binary_search(&target_word) {
+        Ok(i) => i,
+        Err(0) => 0,
+        Err(i) => i - 1,
+    }
+}
+
+/// Resolve a jump to the target *instruction* index (Luau VM: `pc++` on the opcode word, then `pc += offset` in words).
+pub fn jump_target(
+    inst_pc: usize,
+    instructions: &[crate::bytecode::Instruction],
+    raw: u32,
+    op: Opcode,
+) -> Option<usize> {
+    let word_starts = instruction_word_starts(instructions);
+    let total_words = total_instruction_words(instructions);
+    jump_target_with_starts(inst_pc, &word_starts, total_words, raw, op)
+}
+
+pub fn jump_target_with_starts(
+    inst_pc: usize,
+    word_starts: &[usize],
+    total_words: usize,
+    raw: u32,
+    op: Opcode,
+) -> Option<usize> {
+    let next_word = *word_starts.get(inst_pc)? + 1;
+    let offset = if op.is_jump_d() {
+        insn_d(raw)
     } else if matches!(op, Opcode::JumpX) {
-        let e = insn_e(raw);
-        Some((pc as i32 + e + 1) as usize)
+        insn_e(raw)
     } else if matches!(op, Opcode::LoadB) {
         let c = insn_c(raw);
-        if c != 0 {
-            Some(pc + c as usize + 1)
-        } else {
-            None
+        if c == 0 {
+            return None;
         }
+        i32::from(c)
     } else {
-        None
+        return None;
+    };
+    let target_word = (next_word as i32).wrapping_add(offset);
+    if target_word < 0 || target_word as usize >= total_words {
+        return None;
     }
+    Some(word_to_inst_pc(target_word as usize, word_starts))
 }
 
 pub fn aux_kv(aux: u32) -> u16 {

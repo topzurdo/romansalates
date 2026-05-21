@@ -11860,11 +11860,20 @@ Main = (function()
 			local getBytecode = env.getscriptbytecode or getscriptbytecode or getsbc
 			local http = env.request or request or httprequest
 			if not getBytecode or not http then
-				error("DEX decompile: need getscriptbytecode and httprequest (run bytecode_decompiler.exe)")
+				error("[executor_missing] DEX decompile: need getscriptbytecode and httprequest (run bytecode_decompiler.exe)")
 			end
 			local bcOk, bytecode = pcall(getBytecode, script)
 			if not bcOk or type(bytecode) ~= "string" or bytecode == "" then
-				error("DEX decompile: getscriptbytecode failed")
+				local hint = bcOk and "empty bytecode" or tostring(bytecode)
+				error(
+					"[bytecode_unavailable] DEX decompile: getscriptbytecode failed ("
+						.. hint
+						.. "). Large/core ModuleScripts often cannot be read by the executor — try IY decompile on a copy, save bytecode to a file, or decompile: "
+						.. (script:GetFullName() or script.Name)
+				)
+			end
+			if #bytecode < 8 then
+				error("[bytecode_unavailable] DEX decompile: bytecode too small (" .. #bytecode .. " bytes) for " .. script:GetFullName())
 			end
 			local url = getgenv().IY_DECOMPILER_URL or "http://127.0.0.1:31337/decompile"
 			local res = http({
@@ -11881,13 +11890,27 @@ Main = (function()
 					return service.HttpService:JSONDecode(res.Body)
 				end)
 				if bodyOk and body and body.ok and body.code then
-					return body.code
+					local code = body.code
+					if type(body.warnings) == "table" and #body.warnings > 0 then
+						local header = {}
+						for _, w in ipairs(body.warnings) do
+							table.insert(header, "-- warning: " .. tostring(w))
+						end
+						if type(code) == "string" and code ~= "" and not code:find("^%-%- warning:", 1) then
+							code = table.concat(header, "\n") .. "\n" .. code
+						end
+					end
+					return code
 				end
 				if bodyOk and body and body.error then
-					error(body.error)
+					local err = body.error
+					if not err:find("%[") then
+						err = "[decompile_failed] " .. err
+					end
+					error(err .. " (run bytecode_decompiler.exe with --diag for details)")
 				end
 			end
-			error("DEX decompile: is bytecode_decompiler.exe running? (--serve)")
+			error("[server_unreachable] DEX decompile: is bytecode_decompiler.exe running? (--serve)")
 		end
 
 		getgenv().decompile = iyBytecodeDecompile

@@ -87,8 +87,8 @@ pub fn validate_proto_with_options(
             }
         }
 
-        if let Some(target) = jump_target(pc, inst.raw, inst.opcode) {
-            if target > n {
+        if let Some(target) = jump_target(pc, &proto.instructions, inst.raw, inst.opcode) {
+            if target >= n {
                 let msg = format!(
                     "proto {index} pc {pc}: jump target {target} past end ({n} instructions)"
                 );

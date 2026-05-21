@@ -197,7 +197,7 @@ end
 
 local function iyDecompileBytecode(bytecode)
 	if not httprequest then
-		return nil, 'httprequest is not available in this executor'
+		return nil, '[executor_missing] httprequest is not available in this executor'
 	end
 	local ok, res = pcall(function()
 		return httprequest({
@@ -213,11 +213,25 @@ local function iyDecompileBytecode(bytecode)
 	if type(res) == 'table' and (res.StatusCode == 200 or res.Success) and res.Body then
 		local body = HttpService:JSONDecode(res.Body)
 		if body.ok then
-			return body.code, nil
+			local code = body.code
+			if type(body.warnings) == 'table' and #body.warnings > 0 then
+				local header = {}
+				for _, w in ipairs(body.warnings) do
+					table.insert(header, '-- warning: ' .. tostring(w))
+				end
+				if type(code) == 'string' and code ~= '' and not code:find('^%-%- warning:', 1) then
+					code = table.concat(header, '\n') .. '\n' .. code
+				end
+			end
+			return code, nil
 		end
-		return nil, body.error or 'decompiler returned an error'
+		local err = body.error or 'decompiler returned an error'
+		if not err:find('%[') then
+			err = '[decompile_failed] ' .. err
+		end
+		return nil, err .. ' (run bytecode_decompiler.exe with --diag for details)'
 	end
-	return nil, 'invalid response from decompiler (is bytecode_decompiler.exe --serve running?)'
+	return nil, '[server_unreachable] invalid response from decompiler (is bytecode_decompiler.exe --serve running?)'
 end
 
 local function iyGetBytecodeTarget(args)
@@ -4574,7 +4588,7 @@ CMDs[#CMDs + 1] = {NAME = 'console', DESC = 'Loads Roblox console'}
 CMDs[#CMDs + 1] = {NAME = 'oldconsole', DESC = 'Loads old Roblox console'}
 CMDs[#CMDs + 1] = {NAME = 'explorer / dex', DESC = 'Opens DEX by Moon'}
 CMDs[#CMDs + 1] = {NAME = 'olddex / odex', DESC = 'Opens Old DEX by Moon'}
-CMDs[#CMDs + 1] = {NAME = 'remotespy / rspy', DESC = 'Opens Simple Spy V3'}
+CMDs[#CMDs + 1] = {NAME = 'remotespy / rspy', DESC = 'Opens SimpleSpy (decompile via bytecode_decompiler.exe)'}
 CMDs[#CMDs + 1] = {NAME = 'executor', DESC = 'Opens an internal executor gui by dnezero'}
 CMDs[#CMDs + 1] = {NAME = 'decompile / luaudec [instance]', DESC = 'Decompiles Luau bytecode via local bytecode_decompiler.exe (run with --serve)'}
 CMDs[#CMDs + 1] = {NAME = 'audiologger / alogger', DESC = 'Opens Edges audio logger'}
@@ -10583,7 +10597,7 @@ addcmd('oldconsole',{},function(args, speaker)
 end)
 
 addcmd("explorer", {"dex"}, function(args, speaker)
-	notify("DEX", "Loading...")
+	notify("DEX", "Loading...") 
 	getgenv().IY_DECOMPILER_URL = IY_DECOMPILER_URL
 	getgenv().IY_decompile = iyDecompileScript
 
@@ -10679,9 +10693,16 @@ end)
 
 addcmd('remotespy',{'rspy'},function(args, speaker)
 	notify("Loading",'Hold on a sec')
-	-- Full credit to exx, creator of SimpleSpy
-	-- also thanks to Amity for fixing
-	loadstring(game:HttpGet("https://raw.githubusercontent.com/infyiff/backup/main/SimpleSpyV3/main.lua"))()
+	getgenv().IY_DECOMPILER_URL = IY_DECOMPILER_URL
+	getgenv().IY_decompile = iyDecompileScript
+	local ok, err = pcall(function()
+		loadstring(iyFetchRepo("remotespy.lua"))()
+	end)
+	if ok then
+		notify("RemoteSpy", "Loaded. Keep bytecode_decompiler.exe --serve running for Decompile")
+	else
+		notify("RemoteSpy", "Failed to load: " .. tostring(err))
+	end
 end)
 
 addcmd("executor", {}, function(args, speaker)

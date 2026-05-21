@@ -1,0 +1,85 @@
+{
+  "note": "corpus_*.bin regression set. New export deduped (PlayerScripts vs StarterPlayerScripts twins removed).",
+  "files": [
+    {
+      "file": "corpus_click_to_move.bin",
+      "source": "PlayerModule.ControlModule.ClickToMoveController",
+      "bytes": 34233
+    },
+    {
+      "file": "corpus_camera_popper.bin",
+      "source": "PlayerModule.CameraModule.ZoomController.Popper",
+      "bytes": 9670
+    },
+    {
+      "file": "corpus_cmdr_util.bin",
+      "source": "ReplicatedStorage.CmdrClient.Shared.Util",
+      "bytes": 11508
+    },
+    {
+      "file": "corpus_base_camera.bin",
+      "source": "PlayerModule.CameraModule.BaseCamera",
+      "bytes": 14405
+    },
+    {
+      "file": "corpus_control_module.bin",
+      "source": "PlayerModule.ControlModule",
+      "bytes": 13907
+    },
+    {
+      "file": "corpus_cmdr_window.bin",
+      "source": "ReplicatedStorage.CmdrClient.CmdrInterface.Window",
+      "bytes": 7967
+    },
+    {
+      "file": "corpus_queue_script.bin",
+      "source": "StarterGui.Lobby.QueueFrame.QueueScript",
+      "bytes": 5355
+    },
+    {
+      "file": "corpus_rbx_character_sounds.bin",
+      "source": "PlayerScripts.RbxCharacterSounds",
+      "bytes": 10167
+    },
+    {
+      "file": "corpus_classic_camera.bin",
+      "source": "PlayerModule.CameraModule.ClassicCamera",
+      "bytes": 5026
+    },
+    {
+      "file": "corpus_cmdr_argument.bin",
+      "source": "ReplicatedStorage.CmdrClient.Shared.Argument",
+      "bytes": 5029
+    },
+    {
+      "file": "corpus_clans_permissions.bin",
+      "source": "ReplicatedStorage.FrameworkDependencies.*.Clans.Permissions",
+      "bytes": 1533
+    },
+    {
+      "file": "corpus_teleport_handler.bin",
+      "source": "StarterGui.Teleports.Lobby_-_Legacy.TeleportHandler",
+      "bytes": 1585
+    },
+    {
+      "file": "corpus_troop_item.bin",
+      "source": "ReplicatedStorage.FrameworkDependencies.*.InventoryItems.*.BossToilet5",
+      "bytes": 2182
+    },
+    {
+      "file": "corpus_framework_loader.bin",
+      "source": "MultiboxFramework client loader (WaitForModule / LoadFramework)",
+      "bytes": 6027
+    },
+    {
+      "file": "corpus_post_office.bin",
+      "source": "PostOffice UI client module",
+      "bytes": 30125
+    },
+    {
+      "file": "corpus_cmdr_client.bin",
+      "source": "Cmdr client library entry",
+      "bytes": 3178
+    }
+  ]
+}

@@ -73,6 +73,17 @@ enum OutputMode {
 pub struct DecompileRequest {
     pub bytecode: String,
     pub mode: Option<String>,
+    /// `auto`, `roblox`, or `plain`
+    pub wire: Option<String>,
+    /// When true, fail on unknown opcodes / version mismatches
+    pub strict: Option<bool>,
+}
+
+#[derive(Clone)]
+struct ServerState {
+    diag: bool,
+    wire: WireFormat,
+    strict: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -80,6 +91,8 @@ pub struct DecompileResponse {
     pub ok: bool,
     pub code: String,
     pub error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warnings: Option<Vec<String>>,
 }
 
 pub fn run() -> anyhow::Result<()> {
@@ -94,9 +107,14 @@ pub fn run() -> anyhow::Result<()> {
     if args.serve || args.input.is_none() {
         let rt = tokio::runtime::Runtime::new()?;
         rt.block_on(async move {
+            let state = ServerState {
+                diag: args.diag,
+                wire: args.wire.into(),
+                strict: args.strict,
+            };
             let app = Router::new()
                 .route("/decompile", post(decompile_handler))
-                .with_state(args.diag);
+                .with_state(state);
 
             let listener = tokio::net::TcpListener::bind(args.bind).await?;
             eprintln!("Luau bytecode decompiler — server mode");
@@ -110,7 +128,7 @@ pub fn run() -> anyhow::Result<()> {
         let input = args.input.unwrap();
         let bytes = fs::read(input.as_path())
             .with_context(|| format!("failed to read input file {}", input.display()))?;
-        let code = decompile_bytes(&bytes, args.mode, args.wire.into(), args.strict)?;
+        let (code, _warnings) = decompile_bytes(&bytes, args.mode, args.wire.into(), args.strict)?;
 
         if let Some(path) = args.output {
             fs::write(&path, &code)
@@ -123,7 +141,7 @@ pub fn run() -> anyhow::Result<()> {
 }
 
 async fn decompile_handler(
-    State(diag): State<bool>,
+    State(state): State<ServerState>,
     Json(req): Json<DecompileRequest>,
 ) -> impl IntoResponse {
     let mode = match req.mode.as_deref() {
@@ -131,18 +149,57 @@ async fn decompile_handler(
         Some("raw") | Some("dump") => OutputMode::RawDump,
         _ => OutputMode::Decompile,
     };
+    let wire = match req.wire.as_deref() {
+        Some("roblox") => WireFormat::Roblox227,
+        Some("plain") => WireFormat::Plain,
+        Some("auto") | None => state.wire,
+        other => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(DecompileResponse {
+                    ok: false,
+                    code: String::new(),
+                    error: Some(format!(
+                        "invalid wire {other:?}; use auto, roblox, or plain"
+                    )),
+                    warnings: None,
+                }),
+            );
+        }
+    };
+    let strict = req.strict.unwrap_or(state.strict);
 
-    eprintln!("Request: bytecode_size={}, mode={:?}", req.bytecode.len(), mode);
-    println!("Request: bytecode_size={}, mode={:?}", req.bytecode.len(), mode);
+    let b64_len = req.bytecode.len();
+    eprintln!(
+        "Request: bytecode_size={b64_len}, mode={mode:?}, wire={wire:?}, strict={strict}",
+    );
 
     match STANDARD.decode(req.bytecode) {
         Ok(bytes) => {
-            if diag {
+            eprintln!(
+                "Decoded bytecode: {} bytes (base64 input {b64_len} chars)",
+                bytes.len(),
+            );
+            if bytes.is_empty() {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(DecompileResponse {
+                        ok: false,
+                        code: String::new(),
+                        error: Some(
+                            "[bytecode_unavailable] decoded bytecode is empty — executor may have failed getscriptbytecode"
+                                .into(),
+                        ),
+                        warnings: None,
+                    }),
+                );
+            }
+            if state.diag {
                 match BytecodeReader::read_with_options(
                     &bytes,
                     BytecodeOptions {
-                        wire: WireFormat::Auto,
-                        lenient: true,
+                        wire,
+                        lenient: !strict,
                     },
                 ) {
                     Ok(chunk) => {
@@ -150,17 +207,11 @@ async fn decompile_handler(
                             "Bytecode version: {}  wire: {:?}",
                             chunk.version, chunk.wire_format
                         );
-                        println!(
-                            "Bytecode version: {}  wire: {:?}",
-                            chunk.version, chunk.wire_format
-                        );
                         for w in &chunk.warnings {
                             eprintln!("WARNING: {w}");
-                            println!("WARNING: {w}");
                         }
                         let disasm = Disassembler::disassemble_chunk(&chunk);
                         eprintln!("=== DIAGNOSTIC DISASSEMBLY ===\n{disasm}\n=== END DIAGNOSTIC ===");
-                        println!("=== DIAGNOSTIC DISASSEMBLY ===\n{disasm}\n=== END DIAGNOSTIC ===");
                         let mut unknowns = HashSet::new();
                         for proto in &chunk.protos {
                             for inst in &proto.instructions {
@@ -179,37 +230,43 @@ async fn decompile_handler(
                                     .collect::<Vec<_>>()
                                     .join(" ")
                             );
-                            println!(
-                                "UNKNOWN OPCODES: {}",
-                                list.iter()
-                                    .map(|v| format!("{:02X}", v))
-                                    .collect::<Vec<_>>()
-                                    .join(" ")
-                            );
                         }
                     }
                     Err(e) => eprintln!("DIAG parse error: {e}"),
                 }
             }
-            match panic::catch_unwind(|| {
-                decompile_bytes(&bytes, mode, WireFormat::Auto, false)
-            }) {
-                Ok(Ok(code)) => (
-                    StatusCode::OK,
-                    Json(DecompileResponse {
-                        ok: true,
-                        code,
-                        error: None,
-                    }),
-                ),
-                Ok(Err(err)) => (
+            match panic::catch_unwind(|| decompile_bytes(&bytes, mode, wire, strict)) {
+                Ok(Ok((code, warnings))) => {
+                    eprintln!("Decompile OK: {} chars output", code.len());
+                    if !warnings.is_empty() {
+                        eprintln!("Warnings: {}", warnings.len());
+                    }
+                    (
+                        StatusCode::OK,
+                        Json(DecompileResponse {
+                            ok: true,
+                            code,
+                            error: None,
+                            warnings: if warnings.is_empty() {
+                                None
+                            } else {
+                                Some(warnings)
+                            },
+                        }),
+                    )
+                }
+                Ok(Err(err)) => {
+                    eprintln!("Decompile error: {err}");
+                    (
                     StatusCode::BAD_REQUEST,
                     Json(DecompileResponse {
                         ok: false,
                         code: String::new(),
                         error: Some(err.to_string()),
+                        warnings: None,
                     }),
-                ),
+                    )
+                }
                 Err(payload) => {
                     let msg = if let Some(s) = payload.downcast_ref::<&str>() {
                         (*s).to_string()
@@ -224,6 +281,7 @@ async fn decompile_handler(
                             ok: false,
                             code: String::new(),
                             error: Some(msg),
+                            warnings: None,
                         }),
                     )
                 }
@@ -234,7 +292,8 @@ async fn decompile_handler(
             Json(DecompileResponse {
                 ok: false,
                 code: String::new(),
-                error: Some(err.to_string()),
+                error: Some(format!("[invalid_base64] {err}")),
+                warnings: None,
             }),
         ),
     }
@@ -245,19 +304,22 @@ fn decompile_bytes(
     mode: OutputMode,
     wire: WireFormat,
     strict: bool,
-) -> anyhow::Result<String> {
+) -> anyhow::Result<(String, Vec<String>)> {
     let options = BytecodeOptions {
         wire,
         lenient: !strict,
     };
     let chunk = BytecodeReader::read_with_options(bytes, options).map_err(|e| {
-        anyhow::anyhow!("parse failed: {e}. Try raw dump or disassembly mode for recovery.")
+        anyhow::anyhow!(
+            "[parse_failed] {e}. Try --mode disassembly or raw, or run the server with --diag."
+        )
     })?;
     if !chunk.warnings.is_empty() {
         for w in &chunk.warnings {
             eprintln!("bytecode warning: {w}");
         }
     }
+    let warnings = chunk.warnings.clone();
     let out = match mode {
         OutputMode::RawDump => format!("{chunk:#?}"),
         OutputMode::Disassembly => {
@@ -270,9 +332,8 @@ fn decompile_bytes(
         }
         OutputMode::Decompile => {
             let mut lua = Decompiler::decompile_chunk(&chunk);
-            if !chunk.warnings.is_empty() {
-                let header: String = chunk
-                    .warnings
+            if !warnings.is_empty() {
+                let header: String = warnings
                     .iter()
                     .map(|w| format!("-- warning: {w}\n"))
                     .collect();
@@ -281,5 +342,5 @@ fn decompile_bytes(
             lua
         }
     };
-    Ok(out)
+    Ok((out, warnings))
 }
