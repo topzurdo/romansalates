@@ -10696,7 +10696,7 @@ addcmd('remotespy',{'rspy'},function(args, speaker)
 	getgenv().IY_DECOMPILER_URL = IY_DECOMPILER_URL
 	getgenv().IY_decompile = iyDecompileScript
 	local ok, err = pcall(function()
-		loadstring(iyFetchRepo("remotespy.lua"))()
+		loadstring(game:HttpGet(IY_REPO_RAW .. "remotespy.lua"))()
 	end)
 	if ok then
 		notify("RemoteSpy", "Loaded. Keep bytecode_decompiler.exe --serve running for Decompile")
